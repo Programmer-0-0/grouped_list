@@ -1,9 +1,6 @@
-import 'dart:async';
-import 'dart:collection';
-import 'dart:math' as math;
-
 import 'package:flutter/gestures.dart';
 import 'package:flutter/widgets.dart';
+import 'package:grouped_list/fade_animation.dart';
 
 import 'src/grouped_list_order.dart';
 
@@ -266,304 +263,140 @@ class GroupedListView<T, E> extends StatefulWidget {
         assert(groupSeparatorBuilder != null || groupHeaderBuilder != null);
 
   @override
-  State<StatefulWidget> createState() => _GroupedListViewState<T, E>();
+  State<StatefulWidget> createState() => GroupedListViewState<T, E>();
 }
 
-class _GroupedListViewState<T, E> extends State<GroupedListView<T, E>> {
-  final StreamController<int> _streamController = StreamController<int>();
-  final LinkedHashMap<String, GlobalKey> _keys = LinkedHashMap();
-  final GlobalKey _key = GlobalKey();
-  late final ScrollController _controller;
-  GlobalKey? _groupHeaderKey;
-  List<T> _sortedElements = [];
-  int _topElementIndex = 0;
-  RenderBox? _headerBox;
-  RenderBox? _listBox;
+class GroupedListViewState<T, E> extends State<GroupedListView<T, E>> {
+  // final StreamController<int> _streamController = StreamController<int>();
+  // final LinkedHashMap<String, GlobalKey> _keys = LinkedHashMap();
+  // final GlobalKey _key = GlobalKey();
+  // late final ScrollController _controller;
+  // GlobalKey? _groupHeaderKey;
+  // List<T> _sortedElements = [];
+  // int _topElementIndex = 0;
+  // RenderBox? _headerBox;
+  // RenderBox? _listBox;
 
   /// Fix for backwards compatability
   ///
   /// See:
   /// * https://docs.flutter.dev/development/tools/sdk/release-notes/release-notes-3.0.0#your-code
-  I? _ambiguate<I>(I? value) => value;
+  late Map<E, List<T>> _groupedElements;
+  late List<E> _sortedGroups;
+  final Map<E, GlobalKey<AnimatedListState>> _animatedListKeys = {};
 
   @override
   void initState() {
-    _controller = widget.controller ?? ScrollController();
-    if (widget.useStickyGroupSeparators) {
-      _controller.addListener(_scrollListener);
-    }
     super.initState();
+    _updateGroupedElements();
   }
 
   @override
-  void dispose() {
-    if (widget.useStickyGroupSeparators) {
-      _controller.removeListener(_scrollListener);
+  void didUpdateWidget(GroupedListView<T, E> oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.elements != widget.elements) {
+      _updateGroupedElements();
     }
-    if (widget.controller == null) {
-      _controller.dispose();
+  }
+
+  void _updateGroupedElements() {
+    _groupedElements = _groupElements();
+    _sortedGroups = _sortGroups();
+
+    // Initialize keys for new groups
+    for (var group in _sortedGroups) {
+      _animatedListKeys.putIfAbsent(
+          group, () => GlobalKey<AnimatedListState>());
     }
-    _streamController.close();
-    super.dispose();
+  }
+
+  Map<E, List<T>> _groupElements() {
+    var groupedElements = <E, List<T>>{};
+    for (var element in widget.elements) {
+      var group = widget.groupBy(element);
+      groupedElements.putIfAbsent(group, () => []).add(element);
+    }
+    return groupedElements;
+  }
+
+  List<E> _sortGroups() {
+    var groups = _groupedElements.keys.toList();
+    if (widget.sort && widget.groupComparator != null) {
+      groups.sort(widget.groupComparator);
+    }
+    return groups;
   }
 
   @override
   Widget build(BuildContext context) {
-    _sortedElements = _sortElements();
-    var hiddenIndex = widget.reverse ? _sortedElements.length * 2 - 1 : 0;
-    var isSeparator = widget.reverse ? (int i) => i.isOdd : (int i) => i.isEven;
-    isValidIndex(int i) => i >= 0 && i < _sortedElements.length;
-
-    _ambiguate(WidgetsBinding.instance)!.addPostFrameCallback((_) {
-      _scrollListener();
-    });
-
-    /// The itemBuilder function for this package divides the [index] by two
-    /// because between each element a separator is displayed. Depending on the
-    /// direction of the list and if the [index] is even or odd either a item or
-    /// the separator widget is displayed.
-    ///
-    /// If the [index] points to an separator and the previous and next items
-    /// are in different groups, a group header widget is displayed.
-    Widget itemBuilder(context, index) {
-      if (widget.footer != null && index == _sortedElements.length * 2) {
-        return widget.footer!;
-      }
-      var actualIndex = index ~/ 2;
-      if (index == hiddenIndex) {
-        return Opacity(
-          opacity: widget.useStickyGroupSeparators ? 0 : 1,
-          child: _buildGroupSeparator(_sortedElements[actualIndex]),
+    return ListView.builder(
+      itemCount: _sortedGroups.length,
+      itemBuilder: (context, index) {
+        var group = _sortedGroups[index];
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            widget.groupSeparatorBuilder!(group),
+            AnimatedList(
+              key: _animatedListKeys[group],
+              initialItemCount: _groupedElements[group]!.length,
+              shrinkWrap: true,
+              physics: NeverScrollableScrollPhysics(),
+              itemBuilder: (context, index, animation) {
+                return FadeAnimation(
+                  (1.0 + index) / 4.0,
+                  FadeTransition(
+                    opacity: animation,
+                    child: SizeTransition(
+                      sizeFactor: animation,
+                      child: widget.itemBuilder!(
+                          context, _groupedElements[group]![index]),
+                    ),
+                  ),
+                );
+              },
+            ),
+          ],
         );
-      }
-      var curr = widget.groupBy(_sortedElements[actualIndex]);
-      var preIndex = actualIndex + (widget.reverse ? 1 : -1);
-      var prev = isValidIndex(preIndex)
-          ? widget.groupBy(_sortedElements[preIndex])
-          : null;
-      var nextIndex = actualIndex + (widget.reverse ? -1 : 1);
-      var next = isValidIndex(nextIndex)
-          ? widget.groupBy(_sortedElements[nextIndex])
-          : null;
-      if (isSeparator(index)) {
-        if (prev != curr) {
-          return _buildGroupSeparator(_sortedElements[actualIndex]);
-        }
-        return widget.separator;
-      }
-      return _buildItem(context, actualIndex, prev != curr, curr != next);
-    }
-
-    return Stack(
-      key: _key,
-      alignment: Alignment.topCenter,
-      children: <Widget>[
-        ListView.builder(
-          scrollDirection: widget.scrollDirection,
-          controller: _controller,
-          primary: widget.primary,
-          physics: widget.physics,
-          shrinkWrap: widget.shrinkWrap,
-          padding: widget.padding,
-          reverse: widget.reverse,
-          clipBehavior: widget.clipBehavior,
-          dragStartBehavior: widget.dragStartBehavior,
-          itemExtent: widget.itemExtent,
-          restorationId: widget.restorationId,
-          keyboardDismissBehavior: widget.keyboardDismissBehavior,
-          semanticChildCount: widget.semanticChildCount,
-          itemCount: widget.footer == null
-              ? _sortedElements.length * 2
-              : (_sortedElements.length * 2) + 1,
-          addAutomaticKeepAlives: widget.addAutomaticKeepAlives,
-          addRepaintBoundaries: widget.addRepaintBoundaries,
-          addSemanticIndexes: widget.addSemanticIndexes,
-          cacheExtent: widget.cacheExtent,
-          itemBuilder: itemBuilder,
-        ),
-        StreamBuilder<int>(
-            stream: _streamController.stream,
-            initialData: _topElementIndex,
-            builder: (context, snapshot) {
-              if (snapshot.hasData) {
-                return _showFixedGroupHeader(snapshot.data!);
-              }
-              return const SizedBox.shrink();
-            }),
-      ],
+      },
     );
   }
 
-  /// Returns the widget for element positioned at [index]. The widget is
-  /// retrieved either by [widget.indexedItemBuilder], [widget.itemBuilder]
-  /// or [widget.interdependentItemBuilder].
-  Widget _buildItem(context, int index, bool groupStart, bool groupEnd) =>
-      KeyedSubtree(
-        key: _keys.putIfAbsent('$index', () => GlobalKey()),
-        child: widget.groupItemBuilder != null
-            ? widget.groupItemBuilder!(
-                context,
-                _sortedElements[index],
-                groupStart,
-                groupEnd,
-              )
-            : widget.indexedItemBuilder != null
-                ? widget.indexedItemBuilder!(
-                    context,
-                    _sortedElements[index],
-                    index,
-                  )
-                : widget.interdependentItemBuilder != null
-                    ? widget.interdependentItemBuilder!(
-                        context,
-                        index > 0 ? _sortedElements[index - 1] : null,
-                        _sortedElements[index],
-                        index + 1 < _sortedElements.length
-                            ? _sortedElements[index + 1]
-                            : null,
-                      )
-                    : widget.itemBuilder!(
-                        context,
-                        _sortedElements[index],
-                      ),
-      );
+  // Add methods for inserting and removing items
+  void addItem(T item) {
+    setState(() {
+      var group = widget.groupBy(item);
+      if (!_groupedElements.containsKey(group)) {
+        _groupedElements[group] = [];
+        _sortedGroups.add(group);
+        _animatedListKeys[group] = GlobalKey<AnimatedListState>();
+      }
+      _groupedElements[group]!.insert(0, item);
+      _animatedListKeys[group]!
+          .currentState
+          ?.insertItem(0, duration: Duration(milliseconds: 400));
+    });
+  }
 
-  /// This scroll listener is added to the lists controller if
-  /// [widget.useStickyGroupSeparators] is `true`. In that case the scroll
-  /// listener keeps track of the top most element which is still in the view
-  /// and saves the elements index in order to be able to display the
-  /// corresponding groupHeader on top of the view.
-  ///
-  /// If the option [widget.useStickyGroupSeparators] is `false` this listener
-  /// is not required since the group headers are displayed inside the lists and
-  /// do not need to be always in the visible frame.
-  void _scrollListener() {
-    if (_sortedElements.isEmpty) {
-      return;
-    }
-
-    _listBox ??= _key.currentContext?.findRenderObject() as RenderBox?;
-    var listPos = _listBox?.localToGlobal(Offset.zero).dy ?? 0;
-    _headerBox ??=
-        _groupHeaderKey?.currentContext?.findRenderObject() as RenderBox?;
-    var headerHeight = _headerBox?.size.height ?? 0;
-    var max = double.negativeInfinity;
-    var topItemKey = widget.reverse ? '${_sortedElements.length - 1}' : '0';
-    for (var entry in _keys.entries) {
-      var key = entry.value;
-      if (_isListItemRendered(key)) {
-        var itemBox = key.currentContext!.findRenderObject() as RenderBox;
-        // position of the item's top border inside the list view
-        var y = itemBox.localToGlobal(Offset(0, -listPos - headerHeight)).dy;
-        if (y <= headerHeight && y > max) {
-          topItemKey = entry.key;
-          max = y;
+  void removeItem(T item) {
+    setState(() {
+      var group = widget.groupBy(item);
+      var index = _groupedElements[group]!.indexOf(item);
+      if (index != -1) {
+        _groupedElements[group]!.removeAt(index);
+        _animatedListKeys[group]!.currentState?.removeItem(
+              index,
+              (context, animation) => SizeTransition(
+                sizeFactor: animation,
+                child: widget.itemBuilder!(context, item),
+              ),
+            );
+        if (_groupedElements[group]!.isEmpty) {
+          _groupedElements.remove(group);
+          _sortedGroups.remove(group);
+          _animatedListKeys.remove(group);
         }
       }
-    }
-    var index = math.max(int.parse(topItemKey), 0);
-    if (index != _topElementIndex) {
-      var curr = widget.groupBy(_sortedElements[index]);
-      E prev;
-
-      try {
-        prev = widget.groupBy(_sortedElements[_topElementIndex]);
-      } on RangeError catch (_) {
-        prev = widget.groupBy(_sortedElements[0]);
-      }
-
-      if (prev != curr) {
-        _topElementIndex = index;
-        _streamController.add(_topElementIndex);
-      }
-    }
-  }
-
-  /// Sorts the [widget.elements] according the groups. If
-  /// [widget.groupComparator] is defined, it is used for sorting otherwise the
-  /// natural ordering of [widget.groupBy] is used for sorting.
-  ///
-  /// The elements inside a group are sorted accoring to [widget.itemComparator]
-  /// or their natural order.
-  List<T> _sortElements() {
-    var elements = [...widget.elements];
-    if (widget.sort && elements.isNotEmpty) {
-      elements.sort((e1, e2) {
-        int? compareResult;
-        // compare groups
-        if (widget.groupComparator != null) {
-          compareResult =
-              widget.groupComparator!(widget.groupBy(e1), widget.groupBy(e2));
-        } else if (widget.groupBy(e1) is Comparable) {
-          compareResult = (widget.groupBy(e1) as Comparable)
-              .compareTo(widget.groupBy(e2) as Comparable);
-        }
-        // compare elements inside group
-        if (compareResult == null || compareResult == 0) {
-          if (widget.itemComparator != null) {
-            compareResult = widget.itemComparator!(e1, e2);
-          } else if (e1 is Comparable) {
-            compareResult = e1.compareTo(e2);
-          }
-        }
-        return compareResult!;
-      });
-      if (widget.order == GroupedListOrder.DESC) {
-        elements = elements.reversed.toList();
-      }
-    }
-    return elements;
-  }
-
-  /// Returns the group header [Widget] for the given [topElementIndex].
-  ///
-  /// If the option [widget.useStickyGroupSeparators] is set to `true` a
-  /// [Container] with the group header [Widget] is returned.
-  ///
-  ///  Otherwise an empty [Widget] in form of [SizedBox.shrink] is returned.
-  Widget _showFixedGroupHeader(int topElementIndex) {
-    _groupHeaderKey = GlobalKey();
-    if (widget.useStickyGroupSeparators && _sortedElements.isNotEmpty) {
-      T topElement;
-
-      try {
-        topElement = _sortedElements[topElementIndex];
-      } on RangeError catch (_) {
-        topElement = _sortedElements[0];
-      }
-
-      return Container(
-        key: _groupHeaderKey,
-        color:
-            widget.floatingHeader ? null : widget.stickyHeaderBackgroundColor,
-        width: widget.floatingHeader ? null : MediaQuery.of(context).size.width,
-        child: _buildFixedGroupHeader(topElement),
-      );
-    }
-    return const SizedBox.shrink();
-  }
-
-  /// Returns the group header [Widget] for an [element] based on
-  /// [widget.groupHeaderBuilder] or if null on the
-  /// [widget.groupSeparatorBuilder].
-  Widget _buildGroupSeparator(T element) {
-    if (widget.groupHeaderBuilder == null) {
-      return widget.groupSeparatorBuilder!(widget.groupBy(element));
-    }
-    return widget.groupHeaderBuilder!(element);
-  }
-
-  Widget _buildFixedGroupHeader(T element) {
-    if (widget.groupStickyHeaderBuilder == null) {
-      return _buildGroupSeparator(element);
-    }
-    return widget.groupStickyHeaderBuilder!(element);
-  }
-
-  /// Checks if the list item with the given [key] is currently rendered in the
-  /// view frame.
-  bool _isListItemRendered(GlobalKey<State<StatefulWidget>> key) {
-    return key.currentContext != null &&
-        key.currentContext!.findRenderObject() != null;
+    });
   }
 }
